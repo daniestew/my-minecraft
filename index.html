@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>My Minecraft</title>
     <style>
         * { margin: 0; padding: 0; }
@@ -12,7 +13,7 @@
             top: 50%; left: 50%;
             transform: translate(-50%, -50%);
             color: white;
-            font-size: 24px;
+            font-size: 36px;
             pointer-events: none;
             z-index: 10;
             text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
@@ -27,14 +28,14 @@
             z-index: 10;
         }
         .hotbar-slot {
-            width: 60px; height: 60px;
-            border: 2px solid #555;
+            width: 75px; height: 75px;
+            border: 3px solid #555;
             background: rgba(0,0,0,0.6);
             display: flex;
             align-items: center;
             justify-content: center;
             color: white;
-            font-size: 14px;
+            font-size: 16px;
             font-family: monospace;
             text-align: center;
         }
@@ -124,14 +125,101 @@
         }
         #instructions h1 { font-size: 32px; margin-bottom: 20px; }
         #instructions p { margin: 8px 0; }
+        #healthbar {
+            position: fixed;
+            top: 20px; left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 4px;
+            z-index: 10;
+        }
+        .heart {
+            width: 36px; height: 36px;
+            font-size: 32px;
+            line-height: 24px;
+            text-align: center;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.7);
+        }
+        #airbar {
+            position: fixed;
+            top: 48px; left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            display: none;
+        }
+        #airbar-inner {
+            width: 200px; height: 12px;
+            background: #333;
+            border: 2px solid #555;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        #airbar-fill {
+            height: 100%;
+            background: #40A0E0;
+            border-radius: 4px;
+            transition: width 0.2s;
+        }
+        #airbar-text {
+            color: white;
+            font-family: monospace;
+            font-size: 11px;
+            text-align: center;
+            text-shadow: 1px 1px 1px #000;
+        }
+        #crafting-ui, #chest-ui {
+            position: fixed;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(30,30,30,0.95);
+            border: 3px solid #666;
+            border-radius: 12px;
+            padding: 30px 40px;
+            z-index: 30;
+        }
+        #crafting-ui h2, #chest-ui h2 {
+            color: #fff;
+            font-family: monospace;
+            font-size: 28px;
+            margin-bottom: 16px;
+            text-align: center;
+        }
+        #craft-grid, #chest-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 120px);
+            gap: 10px;
+            justify-content: center;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        #hurt-overlay {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(255, 0, 0, 0.3);
+            pointer-events: none;
+            z-index: 15;
+            display: none;
+        }
     </style>
 </head>
 <body>
+    <div id="hurt-overlay"></div>
+    <div id="healthbar"></div>
+    <div id="airbar"><div id="airbar-inner"><div id="airbar-fill"></div></div><div id="airbar-text"></div></div>
     <div id="crosshair">+</div>
     <div id="hotbar"></div>
     <div id="inventory">
         <h2>Inventory</h2>
         <div id="inv-grid"></div>
+    </div>
+    <div id="crafting-ui" style="display:none;">
+        <h2>Crafting Table</h2>
+        <div id="craft-grid"></div>
+    </div>
+    <div id="chest-ui" style="display:none;">
+        <h2>Chest</h2>
+        <div id="chest-grid"></div>
     </div>
     <div id="instructions">
         <h1>My Minecraft</h1>
@@ -139,8 +227,9 @@
         <p>WASD - Move | Space - Jump</p>
         <p>Left Click - Break | Right Click - Place</p>
         <p>Right-drag - Look (if pointer lock unavailable)</p>
-        <p>1-6 - Select Block | Scroll - Cycle Blocks</p>
-        <p>E - Open Inventory</p>
+        <p>1-9 - Select Block | Scroll - Cycle Blocks</p>
+        <p>E - Open Inventory | Right Click - Pick up special blocks</p>
+        <p>Left Click Crafting Table = Craft | Left Click Chest = Storage</p>
     </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="game.js"></script>
