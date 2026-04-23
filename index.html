@@ -247,6 +247,9 @@
     <div id="airbar"><div id="airbar-inner"><div id="airbar-fill"></div></div><div id="airbar-text"></div></div>
     <div id="crosshair">+</div>
     <div id="hotbar" style="display:none;"></div>
+    <div id="lock-status" style="position:fixed;top:8px;right:8px;padding:4px 8px;background:rgba(0,0,0,0.6);color:#fff;font-family:monospace;font-size:12px;border-radius:4px;z-index:15;display:none;">⚠️ Pointer lock blocked (iframe) — open http://localhost:8080 in a new tab for smooth camera</div>
+    <!-- Blue tint + bubble effect when the player's head is underwater -->
+    <div id="water-overlay" style="position:fixed;inset:0;pointer-events:none;z-index:5;display:none;background:radial-gradient(ellipse at center, rgba(20,120,200,0.35) 0%, rgba(10,60,130,0.55) 100%);mix-blend-mode:multiply;"></div>
     <div id="inventory">
         <h2>Inventory</h2>
         <div id="inv-grid"></div>
@@ -281,6 +284,6 @@
         <p id="creative-hint" style="display:none;">Double-tap Space to fly/stop flying | Shift to go down</p>
     </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="game.js"></script>
+    <script src="game.js?v=6"></script>
 </body>
 </html>

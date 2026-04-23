@@ -857,6 +857,144 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(window.devicePixelRatio);
 document.body.appendChild(renderer.domElement);
 
+// -----------------------------------------------------------------------------
+// CameraController — two-mode FPS mouse-look.
+//
+// WINDOW mode (Pointer Lock API available):
+//   • Click canvas → cursor captured, mouse moves freely rotate the camera.
+//   • ESC → cursor released.
+//   • Left-click = break; right-click = place.
+//
+// IFRAME mode (Pointer Lock blocked, e.g. sandboxed preview):
+//   • Hold RIGHT mouse button and drag to rotate the camera.
+//   • Release right (without dragging) = place block.
+//   • Left-click still breaks.
+//
+// Mode is auto-detected on first lock attempt:
+//   • 'lock' event fires → WINDOW mode (permanent for this session).
+//   • 'pointerlockerror' fires → IFRAME mode (permanent for this session).
+//
+// Two details from the research that matter in window mode:
+//   1. Round-trip through the quaternion via a YXZ Euler (avoids drift that happens when
+//      reading/writing camera.rotation directly — Object3D's rotation uses a separate order).
+//   2. { unadjustedMovement: true } disables OS mouse acceleration — the fix for "laggy/jumpy".
+// -----------------------------------------------------------------------------
+const CameraController = (() => {
+    const LOCK_SENSITIVITY = 0.002;   // radians per pixel, matches PointerLockControls default
+    const DRAG_SENSITIVITY = 0.004;   // higher — no acceleration help, cursor is viewport-bounded
+    const PITCH_LIMIT = Math.PI / 2 - 0.001;
+    const MAX_DELTA_PX = 120;
+    const DRAG_PLACE_THRESHOLD = 10;  // total px moved while right held; below = "click"
+    const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
+
+    let mode = 'pending';   // 'pending' | 'lock' | 'drag' — set on first pointer-lock result
+    let lockActive = false; // cursor captured via Pointer Lock API
+    let dragActive = false; // right mouse is held (drag mode only)
+    let dragDistance = 0;
+
+    function rotate(dYaw, dPitch) {
+        _euler.setFromQuaternion(camera.quaternion);
+        _euler.y += dYaw;
+        _euler.x += dPitch;
+        if (_euler.x >  PITCH_LIMIT) _euler.x =  PITCH_LIMIT;
+        if (_euler.x < -PITCH_LIMIT) _euler.x = -PITCH_LIMIT;
+        camera.quaternion.setFromEuler(_euler);
+    }
+
+    // Ask for pointer lock. Result lands in pointerlockchange / pointerlockerror, which set mode.
+    function tryLock() {
+        try {
+            const p = renderer.domElement.requestPointerLock({ unadjustedMovement: true });
+            if (p && typeof p.catch === 'function') {
+                p.catch(() => renderer.domElement.requestPointerLock());
+            }
+        } catch (_) {
+            try { renderer.domElement.requestPointerLock(); } catch (__) {}
+        }
+    }
+
+    function start() {
+        if (mode === 'drag') return; // drag mode doesn't need explicit start — it's event-driven
+        tryLock();
+    }
+
+    function stop() {
+        if (lockActive) { try { document.exitPointerLock(); } catch (_) {} }
+        dragActive = false;
+        document.body.classList.remove('looking');
+    }
+
+    document.addEventListener('pointerlockchange', () => {
+        lockActive = document.pointerLockElement === renderer.domElement;
+        if (lockActive) {
+            mode = 'lock';
+            document.body.classList.add('looking');
+        } else {
+            document.body.classList.remove('looking');
+        }
+    });
+
+    document.addEventListener('pointerlockerror', () => {
+        // Pointer lock is not available (sandbox/iframe). Lock mode into 'drag' permanently.
+        mode = 'drag';
+        lockActive = false;
+        const el = document.getElementById('lock-status');
+        if (el) {
+            el.textContent = '🖱 Hold RIGHT mouse button + drag to look around';
+            el.style.display = 'block';
+        }
+    });
+
+    // Unified mousemove — branches on mode.
+    document.addEventListener('mousemove', (e) => {
+        let mx = e.movementX || 0;
+        let my = e.movementY || 0;
+        if (mx >  MAX_DELTA_PX || mx < -MAX_DELTA_PX) return;
+        if (my >  MAX_DELTA_PX || my < -MAX_DELTA_PX) return;
+
+        if (lockActive) {
+            rotate(-mx * LOCK_SENSITIVITY, -my * LOCK_SENSITIVITY);
+        } else if (dragActive) {
+            // Discard events with cursor outside viewport (implicit pointer capture on button-hold).
+            if (e.clientX < 0 || e.clientY < 0 ||
+                e.clientX >= window.innerWidth || e.clientY >= window.innerHeight) return;
+            rotate(-mx * DRAG_SENSITIVITY, -my * DRAG_SENSITIVITY);
+            dragDistance += Math.abs(mx) + Math.abs(my);
+        }
+    });
+
+    // Drag-mode: right mouse button starts/stops look-look
+    document.addEventListener('mousedown', (e) => {
+        if (mode !== 'drag') return;
+        if (e.button === 2 && gameActive && !inventoryOpen && !craftingOpen && !chestOpen) {
+            dragActive = true;
+            dragDistance = 0;
+            document.body.classList.add('looking');
+            e.preventDefault();
+        }
+    }, true); // capture phase so we can flag drag before the break/place handler runs
+
+    document.addEventListener('mouseup', (e) => {
+        if (mode !== 'drag') return;
+        if (e.button === 2) {
+            const wasDragging = dragActive && dragDistance > DRAG_PLACE_THRESHOLD;
+            dragActive = false;
+            document.body.classList.remove('looking');
+            // Expose the drag result so the break/place handler below can check it
+            CameraController._lastRightWasDrag = wasDragging;
+        }
+    }, true);
+
+    return {
+        start, stop, rotate,
+        getMode: () => mode,
+        isLocked: () => lockActive,
+        isDragging: () => dragActive,
+        consumeDragFlag: () => { const v = !!CameraController._lastRightWasDrag; CameraController._lastRightWasDrag = false; return v; },
+        _lastRightWasDrag: false,
+    };
+})();
+
 // Lighting
 const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
 scene.add(ambientLight);
@@ -2833,6 +2971,7 @@ function getSpawnY(x, z) {
 const keys = {};
 let gameActive = false;
 let pointerLocked = false;
+const _syncEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 
 document.addEventListener('keydown', (e) => {
     keys[e.code] = true;
@@ -2853,71 +2992,20 @@ document.addEventListener('keydown', (e) => {
 });
 document.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
-// === MOUSE NAVIGATION ===
-// Classic FPS click-to-lock pattern:
-//   - Click the canvas to enter "look mode" (cursor captured, mouse controls camera)
-//   - ESC to exit look mode
-//   - In look mode: left-click = break, right-click = place (no drag required)
-// If pointer lock is unavailable (e.g. sandboxed iframe), look mode still works
-// via raw mousemove deltas; the cursor stays visible but camera rotation works.
-const MOUSE_SENSITIVITY = 0.0022;   // radians per pixel
-const MAX_DELTA_PX = 80;            // cap spurious spikes during lock transitions
-const PITCH_LIMIT = Math.PI / 2 - 0.01;
-
-let lookMode = false;    // user wants the mouse to drive the camera
-
-function enterLookMode() {
-    if (lookMode) return;
-    lookMode = true;
-    document.body.classList.add('looking');
-    try { renderer.domElement.requestPointerLock(); } catch (err) {}
-}
-
-function exitLookMode() {
-    if (!lookMode) return;
-    lookMode = false;
-    document.body.classList.remove('looking');
-    if (document.pointerLockElement) {
-        try { document.exitPointerLock(); } catch (err) {}
-    }
-}
-
-document.addEventListener('pointerlockchange', () => {
-    pointerLocked = document.pointerLockElement === renderer.domElement;
-    if (!pointerLocked && lookMode) {
-        // Lock released externally (ESC) — exit look mode too
-        lookMode = false;
-        document.body.classList.remove('looking');
-    }
-});
-document.addEventListener('pointerlockerror', () => { pointerLocked = false; });
-
-// Single mousemove handler — simple, direct, no buffering.
-// Applies to every mouse move while in look mode.
-document.addEventListener('mousemove', (e) => {
-    if (!lookMode || !gameActive) return;
-    let mx = e.movementX || 0;
-    let my = e.movementY || 0;
-    if (mx >  MAX_DELTA_PX || mx < -MAX_DELTA_PX) mx = 0;
-    if (my >  MAX_DELTA_PX || my < -MAX_DELTA_PX) my = 0;
-    player.yaw -= mx * MOUSE_SENSITIVITY;
-    player.pitch -= my * MOUSE_SENSITIVITY;
-    if (player.pitch >  PITCH_LIMIT) player.pitch =  PITCH_LIMIT;
-    if (player.pitch < -PITCH_LIMIT) player.pitch = -PITCH_LIMIT;
-    // Push to camera immediately — avoids 1-frame lag
-    camera.rotation.y = player.yaw;
-    camera.rotation.x = player.pitch;
-});
-
-document.addEventListener('click', (e) => {
+// Click → enter look mode. ESC → exit.
+document.addEventListener('click', () => {
     if (!gameActive) {
         gameActive = true;
         document.getElementById('instructions').style.display = 'none';
         return;
     }
     if (inventoryOpen || craftingOpen || chestOpen) return;
-    if (!lookMode) enterLookMode();
+    if (!CameraController.isActive()) CameraController.start();
 });
+
+// Legacy aliases for other game code that references these names.
+function enterLookMode() { CameraController.start(); }
+function exitLookMode()  { CameraController.stop(); }
 
 function pickUpSpecialBlock() {
     // Right-click on crafting table or chest to pick it up
@@ -3019,32 +3107,60 @@ function toggleDoor(x, y, z) {
     rebuildChunkAt(x, z);
 }
 
-// Left click = break (or interact), right click = place (or pick up).
-// If not in look mode, the first click enters look mode instead of performing an action.
+function doLeftAction() {
+    const hitVC = raycastVillageChest();
+    if (hitVC) { openChest(hitVC.x, hitVC.y, hitVC.z); return; }
+    const hitB = raycastBed();
+    if (hitB) { sleep(); return; }
+    const hitH = raycastHostile();
+    if (hitH) { hitHostile(hitH); return; }
+    const hitA = raycastAnimal();
+    if (hitA) { hitAnimal(hitA); return; }
+    const hitP = raycastPlant();
+    if (hitP) { breakPlant(hitP); return; }
+    breakBlock();
+}
+function doRightAction() {
+    if (!pickUpSpecialBlock()) placeBlock();
+}
+
+// Click routing depends on CameraController mode.
+// • Lock mode: first click engages pointer lock; subsequent clicks = actions.
+// • Drag mode: clicks always perform actions. Right click's action fires on mouseup
+//              only if the user didn't drag to look — handled below.
 document.addEventListener('mousedown', (e) => {
     if (!gameActive) return;
     if (craftingOpen || chestOpen || inventoryOpen) return;
-    if (!lookMode) {
-        enterLookMode();
+
+    const mode = CameraController.getMode();
+
+    if (mode !== 'drag' && !CameraController.isLocked()) {
+        CameraController.start();
         e.preventDefault();
         return;
     }
+
     if (e.button === 0) {
-        // Interact targets, in priority order
-        const hitVC = raycastVillageChest();
-        if (hitVC) { openChest(hitVC.x, hitVC.y, hitVC.z); return; }
-        const hitB = raycastBed();
-        if (hitB) { sleep(); return; }
-        const hitH = raycastHostile();
-        if (hitH) { hitHostile(hitH); return; }
-        const hitA = raycastAnimal();
-        if (hitA) { hitAnimal(hitA); return; }
-        const hitP = raycastPlant();
-        if (hitP) { breakPlant(hitP); return; }
-        breakBlock();
-    } else if (e.button === 2 || e.button === 1) {
-        if (!pickUpSpecialBlock()) placeBlock();
+        doLeftAction();
+    } else if (e.button === 2) {
+        if (mode === 'lock') {
+            doRightAction();
+            e.preventDefault();
+        }
+        // Drag mode: the controller's capture-phase listener has already flagged dragActive;
+        // we'll decide whether to place on mouseup based on whether any drag happened.
+    } else if (e.button === 1) {
+        doRightAction();
         e.preventDefault();
+    }
+});
+
+document.addEventListener('mouseup', (e) => {
+    if (!gameActive) return;
+    if (craftingOpen || chestOpen || inventoryOpen) return;
+    if (e.button === 2 && CameraController.getMode() === 'drag') {
+        // If the user dragged to look, don't place a block; otherwise this was a click.
+        if (!CameraController.consumeDragFlag()) doRightAction();
     }
 });
 
@@ -3063,7 +3179,7 @@ document.addEventListener('keydown', (e) => {
     if (e.code === 'Escape') {
         if (craftingOpen) { closeCrafting(); return; }
         if (chestOpen) { closeChest(); return; }
-        if (lookMode) { exitLookMode(); return; }
+        if (CameraController.isActive()) { CameraController.stop(); return; }
     }
     if (inventoryOpen || craftingOpen || chestOpen) return;
     const num = parseInt(e.key);
@@ -3231,6 +3347,12 @@ function update() {
 
     if (!gameActive) return;
 
+    // Camera quaternion is the source of truth. Derive yaw/pitch in YXZ order
+    // so movement/raycast code reads consistent values regardless of Euler order.
+    _syncEuler.setFromQuaternion(camera.quaternion);
+    player.yaw = _syncEuler.y;
+    player.pitch = _syncEuler.x;
+
     // Movement direction
     const forward = new THREE.Vector3(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
     const right = new THREE.Vector3(Math.cos(player.yaw), 0, -Math.sin(player.yaw));
@@ -3244,13 +3366,14 @@ function update() {
     if (move.length() > 0) move.normalize();
     move.multiplyScalar(MOVE_SPEED);
 
-    // Arrow keys camera look (works without pointer lock)
+    // Arrow keys camera look — go through the controller so clamping stays consistent.
     const LOOK_SPEED = 3.0;
-    if (keys['ArrowLeft']) player.yaw += LOOK_SPEED * dt;
-    if (keys['ArrowRight']) player.yaw -= LOOK_SPEED * dt;
-    if (keys['ArrowUp']) player.pitch += LOOK_SPEED * dt;
-    if (keys['ArrowDown']) player.pitch -= LOOK_SPEED * dt;
-    player.pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, player.pitch));
+    let dYaw = 0, dPitch = 0;
+    if (keys['ArrowLeft'])  dYaw   += LOOK_SPEED * dt;
+    if (keys['ArrowRight']) dYaw   -= LOOK_SPEED * dt;
+    if (keys['ArrowUp'])    dPitch += LOOK_SPEED * dt;
+    if (keys['ArrowDown'])  dPitch -= LOOK_SPEED * dt;
+    if (dYaw || dPitch) CameraController.rotate(dYaw, dPitch);
 
     // position.y = feet position throughout
 
@@ -3349,11 +3472,7 @@ function update() {
     }
     updateAirBar(inWater);
 
-    // Update camera — eye is above feet
     camera.position.set(player.position.x, player.position.y + PLAYER_EYE, player.position.z);
-    camera.rotation.order = 'YXZ';
-    camera.rotation.y = player.yaw;
-    camera.rotation.x = player.pitch;
 
     // Update highlight
     const hit = raycast();
@@ -3381,6 +3500,17 @@ function update() {
 
     // Water flow
     updateWater(dt);
+
+    // Underwater visual feedback — overrides day/night fog while head is submerged
+    const waterOverlay = document.getElementById('water-overlay');
+    if (waterOverlay) waterOverlay.style.display = inWater ? 'block' : 'none';
+    if (inWater) {
+        scene.fog.color.setHex(0x1060A0);
+        scene.fog.near = 2;
+        scene.fog.far = 18;
+        scene.background = scene.background || new THREE.Color();
+        scene.background.setHex(0x1878B8);
+    }
 }
 
 function animate() {
