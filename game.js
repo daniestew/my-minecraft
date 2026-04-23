@@ -52,7 +52,7 @@ const BLOCK_NAMES = {
     [BLOCKS.STONE_SWORD]: 'Stone Sword',
 };
 
-const HOTBAR_BLOCKS = [BLOCKS.GRASS, BLOCKS.DIRT, BLOCKS.STONE, BLOCKS.WOOD, BLOCKS.LEAVES, BLOCKS.SAND, BLOCKS.DOOR_CLOSED, BLOCKS.CRAFTING_TABLE, BLOCKS.CHEST, BLOCKS.WOOD_SWORD, BLOCKS.STONE_SWORD];
+const HOTBAR_BLOCKS = [BLOCKS.GRASS, BLOCKS.DIRT, BLOCKS.STONE, BLOCKS.WOOD, BLOCKS.LEAVES, BLOCKS.SAND, BLOCKS.WATER, BLOCKS.DOOR_CLOSED, BLOCKS.CRAFTING_TABLE, BLOCKS.CHEST, BLOCKS.WOOD_SWORD, BLOCKS.STONE_SWORD];
 
 // Items that are not placeable blocks
 const ITEMS = new Set([BLOCKS.WOOD_SWORD, BLOCKS.STONE_SWORD]);
@@ -68,10 +68,37 @@ inventory[BLOCKS.WOOD] = 10;
 inventory[BLOCKS.LEAVES] = 10;
 inventory[BLOCKS.SAND] = 10;
 inventory[BLOCKS.DOOR_CLOSED] = 5;
+inventory[BLOCKS.WATER] = 5;
 inventory[BLOCKS.CRAFTING_TABLE] = 3;
 inventory[BLOCKS.CHEST] = 3;
 
 let inventoryOpen = false;
+
+// === GAME MODE ===
+let gameMode = 'survival'; // 'survival' or 'creative'
+let flying = false;
+let lastSpaceTap = 0;
+
+function selectMode(mode) {
+    gameMode = mode;
+    document.getElementById('mode-select').style.display = 'none';
+    document.getElementById('instructions').style.display = 'block';
+    if (mode === 'creative') {
+        document.getElementById('creative-hint').style.display = 'block';
+        // Give infinite blocks in creative
+        for (const key in BLOCKS) {
+            if (BLOCKS[key] !== 0) inventory[BLOCKS[key]] = 999;
+        }
+    }
+    if (mode === 'survival') {
+        document.getElementById('healthbar').style.display = 'flex';
+    }
+    document.getElementById('hotbar').style.display = 'flex';
+    updateHotbar();
+    updateHealthBar();
+}
+// Make selectMode available to onclick
+window.selectMode = selectMode;
 
 function getInvCount(blockType) {
     return inventory[blockType] || 0;
@@ -84,6 +111,7 @@ function addToInventory(blockType, count) {
 
 function removeFromInventory(blockType, count) {
     if (!count) count = 1;
+    if (gameMode === 'creative') return true; // unlimited blocks
     if ((inventory[blockType] || 0) < count) return false;
     inventory[blockType] -= count;
     if (inventory[blockType] <= 0) delete inventory[blockType];
@@ -102,7 +130,7 @@ function updateInventoryUI() {
     const grid = document.getElementById('inv-grid');
     grid.innerHTML = '';
     // Blocks
-    const allBlocks = [BLOCKS.GRASS, BLOCKS.DIRT, BLOCKS.STONE, BLOCKS.WOOD, BLOCKS.LEAVES, BLOCKS.SAND, BLOCKS.DOOR_CLOSED, BLOCKS.CRAFTING_TABLE, BLOCKS.CHEST, BLOCKS.WOOD_SWORD, BLOCKS.STONE_SWORD];
+    const allBlocks = [BLOCKS.GRASS, BLOCKS.DIRT, BLOCKS.STONE, BLOCKS.WOOD, BLOCKS.LEAVES, BLOCKS.SAND, BLOCKS.WATER, BLOCKS.DOOR_CLOSED, BLOCKS.CRAFTING_TABLE, BLOCKS.CHEST, BLOCKS.WOOD_SWORD, BLOCKS.STONE_SWORD];
     for (const bt of allBlocks) {
         const slot = document.createElement('div');
         slot.className = 'inv-slot';
@@ -155,6 +183,73 @@ function getBlock(x, y, z) {
 function setBlock(x, y, z, type) {
     const i = worldIndex(x, y, z);
     if (i !== -1) world[i] = type;
+}
+
+// === WATER FLOW ===
+const activeWater = new Set(); // keys: "x,y,z"
+const waterLevel = new Map(); // key -> 0..MAX_WATER_FLOW (0 = source/falling)
+const MAX_WATER_FLOW = 5;
+let waterTickTimer = 0;
+const WATER_TICK = 0.25;
+
+function waterKey(x, y, z) { return x + ',' + y + ',' + z; }
+
+function activateWaterNeighbors(x, y, z) {
+    const dirs = [[0,1,0],[0,-1,0],[1,0,0],[-1,0,0],[0,0,1],[0,0,-1]];
+    for (const d of dirs) {
+        const nx = x + d[0], ny = y + d[1], nz = z + d[2];
+        if (getBlock(nx, ny, nz) === BLOCKS.WATER) {
+            activeWater.add(waterKey(nx, ny, nz));
+        }
+    }
+}
+
+function updateWater(dt) {
+    waterTickTimer += dt;
+    if (waterTickTimer < WATER_TICK) return;
+    waterTickTimer = 0;
+    if (activeWater.size === 0) return;
+
+    const toProcess = Array.from(activeWater);
+    activeWater.clear();
+    const changedChunks = new Set();
+
+    for (const key of toProcess) {
+        const parts = key.split(',');
+        const x = parseInt(parts[0]), y = parseInt(parts[1]), z = parseInt(parts[2]);
+        if (getBlock(x, y, z) !== BLOCKS.WATER) { waterLevel.delete(key); continue; }
+        const level = waterLevel.get(key) || 0;
+
+        // Flow down
+        if (y > 0 && getBlock(x, y - 1, z) === BLOCKS.AIR) {
+            setBlock(x, y - 1, z, BLOCKS.WATER);
+            const dk = waterKey(x, y - 1, z);
+            waterLevel.set(dk, 0);
+            activeWater.add(dk);
+            changedChunks.add((x >> 4) + ',' + (z >> 4));
+            continue;
+        }
+
+        // Spread sideways (limited by level)
+        if (level < MAX_WATER_FLOW) {
+            const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+            for (const d of dirs) {
+                const nx = x + d[0], nz = z + d[1];
+                if (getBlock(nx, y, nz) === BLOCKS.AIR) {
+                    setBlock(nx, y, nz, BLOCKS.WATER);
+                    const nk = waterKey(nx, y, nz);
+                    waterLevel.set(nk, level + 1);
+                    activeWater.add(nk);
+                    changedChunks.add((nx >> 4) + ',' + (nz >> 4));
+                }
+            }
+        }
+    }
+
+    for (const c of changedChunks) {
+        const cp = c.split(',');
+        buildChunkMesh(parseInt(cp[0]), parseInt(cp[1]));
+    }
 }
 
 // 3D noise for caves using layered sine waves
@@ -242,6 +337,513 @@ function generateWorld() {
             }
         }
     }
+
+    // Fourth pass: generate village
+    generateVillage();
+}
+
+const bedPositions = [];
+const bedMeshes = [];
+const villageChestPositions = [];
+const villageChestMeshes = [];
+
+function createBedMesh(x, y, z) {
+    const group = new THREE.Group();
+
+    // Bed frame (wood)
+    const frameGeo = new THREE.BoxGeometry(0.9, 0.25, 1.8);
+    const frameMat = new THREE.MeshLambertMaterial({ color: 0x8B5A2B });
+    const frame = new THREE.Mesh(frameGeo, frameMat);
+    frame.position.y = 0.2;
+    group.add(frame);
+
+    // Mattress (white)
+    const mattGeo = new THREE.BoxGeometry(0.85, 0.1, 1.75);
+    const mattMat = new THREE.MeshLambertMaterial({ color: 0xEEEEEE });
+    const matt = new THREE.Mesh(mattGeo, mattMat);
+    matt.position.y = 0.37;
+    group.add(matt);
+
+    // Pillow (white, at head end)
+    const pillowGeo = new THREE.BoxGeometry(0.6, 0.1, 0.3);
+    const pillowMat = new THREE.MeshLambertMaterial({ color: 0xFFFFFF });
+    const pillow = new THREE.Mesh(pillowGeo, pillowMat);
+    pillow.position.set(0, 0.45, 0.65);
+    group.add(pillow);
+
+    // Red blanket (covers most of bed)
+    const blanketGeo = new THREE.BoxGeometry(0.83, 0.06, 1.2);
+    const blanketMat = new THREE.MeshLambertMaterial({ color: 0xCC2020 });
+    const blanket = new THREE.Mesh(blanketGeo, blanketMat);
+    blanket.position.set(0, 0.43, -0.15);
+    group.add(blanket);
+
+    // Legs
+    const legGeo = new THREE.BoxGeometry(0.08, 0.15, 0.08);
+    const legMat = new THREE.MeshLambertMaterial({ color: 0x6B4226 });
+    const positions = [[-0.38, 0.07, -0.8], [0.38, 0.07, -0.8], [-0.38, 0.07, 0.8], [0.38, 0.07, 0.8]];
+    for (const [lx, ly, lz] of positions) {
+        const leg = new THREE.Mesh(legGeo, legMat);
+        leg.position.set(lx, ly, lz);
+        group.add(leg);
+    }
+
+    // Headboard
+    const hbGeo = new THREE.BoxGeometry(0.9, 0.35, 0.08);
+    const hbMat = new THREE.MeshLambertMaterial({ color: 0x6B4226 });
+    const hb = new THREE.Mesh(hbGeo, hbMat);
+    hb.position.set(0, 0.35, 0.88);
+    group.add(hb);
+
+    group.position.set(x + 0.5, y, z + 0.5);
+    scene.add(group);
+    bedMeshes.push(group);
+    return group;
+}
+
+function spawnBeds() {
+    for (const pos of bedPositions) {
+        createBedMesh(pos.x, pos.y, pos.z);
+    }
+}
+
+function createVillageChestMesh(x, y, z) {
+    const group = new THREE.Group();
+
+    // Bottom half (darker brown)
+    const bottomGeo = new THREE.BoxGeometry(0.8, 0.5, 0.7);
+    const bottomMat = new THREE.MeshLambertMaterial({ color: 0x8B5A20 });
+    const bottom = new THREE.Mesh(bottomGeo, bottomMat);
+    bottom.position.y = 0.25;
+    group.add(bottom);
+
+    // Lid (slightly lighter brown)
+    const lidGeo = new THREE.BoxGeometry(0.82, 0.2, 0.72);
+    const lidMat = new THREE.MeshLambertMaterial({ color: 0x9B6B30 });
+    const lid = new THREE.Mesh(lidGeo, lidMat);
+    lid.position.y = 0.6;
+    group.add(lid);
+
+    // Dark rim around top and bottom
+    const rimGeo = new THREE.BoxGeometry(0.84, 0.04, 0.74);
+    const rimMat = new THREE.MeshLambertMaterial({ color: 0x5A3A15 });
+    const rimTop = new THREE.Mesh(rimGeo, rimMat);
+    rimTop.position.y = 0.5;
+    group.add(rimTop);
+    const rimBottom = new THREE.Mesh(rimGeo, rimMat);
+    rimBottom.position.y = 0.02;
+    group.add(rimBottom);
+
+    // Metal latch on front
+    const latchGeo = new THREE.BoxGeometry(0.15, 0.12, 0.05);
+    const latchMat = new THREE.MeshLambertMaterial({ color: 0x888888 });
+    const latch = new THREE.Mesh(latchGeo, latchMat);
+    latch.position.set(0, 0.45, 0.37);
+    group.add(latch);
+
+    // Metal plate behind latch
+    const plateGeo = new THREE.BoxGeometry(0.2, 0.18, 0.04);
+    const plateMat = new THREE.MeshLambertMaterial({ color: 0x666666 });
+    const plate = new THREE.Mesh(plateGeo, plateMat);
+    plate.position.set(0, 0.43, 0.36);
+    group.add(plate);
+
+    // Dark bands/straps on sides
+    const bandGeo = new THREE.BoxGeometry(0.04, 0.52, 0.72);
+    const bandMat = new THREE.MeshLambertMaterial({ color: 0x5A3A15 });
+    const bandL = new THREE.Mesh(bandGeo, bandMat);
+    const bandR = new THREE.Mesh(bandGeo, bandMat);
+    bandL.position.set(-0.3, 0.3, 0);
+    bandR.position.set(0.3, 0.3, 0);
+    group.add(bandL); group.add(bandR);
+
+    group.position.set(x + 0.5, y, z + 0.5);
+    scene.add(group);
+    villageChestMeshes.push(group);
+
+    // Also register as a chest storage
+    const key = getChestKey(x, y, z);
+    if (!chestStorage[key]) {
+        // Add some loot!
+        chestStorage[key] = {};
+        const lootTable = [
+            { key: BLOCKS.WOOD, min: 2, max: 6 },
+            { key: BLOCKS.STONE, min: 1, max: 4 },
+            { key: BLOCKS.SAND, min: 1, max: 3 },
+            { key: 'food_PIG', min: 1, max: 3 },
+            { key: 'food_COW', min: 1, max: 2 },
+        ];
+        // Pick 2-3 random items
+        const count = 2 + Math.floor(Math.random() * 2);
+        for (let i = 0; i < count; i++) {
+            const item = lootTable[Math.floor(Math.random() * lootTable.length)];
+            const amt = item.min + Math.floor(Math.random() * (item.max - item.min + 1));
+            chestStorage[key][item.key] = (chestStorage[key][item.key] || 0) + amt;
+        }
+    }
+
+    return group;
+}
+
+function spawnVillageChests() {
+    for (const pos of villageChestPositions) {
+        createVillageChestMesh(pos.x, pos.y, pos.z);
+    }
+}
+
+function raycastVillageChest() {
+    const dir = new THREE.Vector3(0, 0, -1);
+    dir.applyEuler(new THREE.Euler(player.pitch, player.yaw, 0, 'YXZ'));
+    const eyePos = new THREE.Vector3(player.position.x, player.position.y + PLAYER_EYE, player.position.z);
+
+    let closest = null;
+    let closestDist = 4;
+
+    for (const c of villageChestPositions) {
+        const cx = c.x + 0.5, cz = c.z + 0.5;
+        const minX = cx - 0.5, maxX = cx + 0.5;
+        const minY = c.y, maxY = c.y + 0.8;
+        const minZ = cz - 0.5, maxZ = cz + 0.5;
+
+        for (let d = 0; d < closestDist; d += 0.1) {
+            const px = eyePos.x + dir.x * d;
+            const py = eyePos.y + dir.y * d;
+            const pz = eyePos.z + dir.z * d;
+            if (px >= minX && px <= maxX && py >= minY && py <= maxY && pz >= minZ && pz <= maxZ) {
+                closest = c;
+                closestDist = d;
+                break;
+            }
+        }
+    }
+    return closest;
+}
+
+function raycastBed() {
+    const dir = new THREE.Vector3(0, 0, -1);
+    dir.applyEuler(new THREE.Euler(player.pitch, player.yaw, 0, 'YXZ'));
+    const eyePos = new THREE.Vector3(player.position.x, player.position.y + PLAYER_EYE, player.position.z);
+
+    let closest = null;
+    let closestDist = 4;
+
+    for (let i = 0; i < bedPositions.length; i++) {
+        const b = bedPositions[i];
+        const bx = b.x + 0.5, bz = b.z + 0.5;
+        const minX = bx - 0.6, maxX = bx + 0.6;
+        const minY = b.y, maxY = b.y + 0.6;
+        const minZ = bz - 1.0, maxZ = bz + 1.0;
+
+        for (let d = 0; d < closestDist; d += 0.1) {
+            const px = eyePos.x + dir.x * d;
+            const py = eyePos.y + dir.y * d;
+            const pz = eyePos.z + dir.z * d;
+            if (px >= minX && px <= maxX && py >= minY && py <= maxY && pz >= minZ && pz <= maxZ) {
+                closest = b;
+                closestDist = d;
+                break;
+            }
+        }
+    }
+    return closest;
+}
+
+let sleeping = false;
+let sleepTimer = 0;
+
+function sleep() {
+    if (dayTime > 0.25 && dayTime < 0.75) {
+        // It's night - can sleep
+        sleeping = true;
+        sleepTimer = 0;
+        document.getElementById('sleep-overlay').style.display = 'block';
+    }
+}
+
+function updateSleep(dt) {
+    if (!sleeping) return;
+    sleepTimer += dt;
+    // Fade to black then skip to morning
+    const overlay = document.getElementById('sleep-overlay');
+    if (sleepTimer < 1) {
+        overlay.style.opacity = sleepTimer;
+    } else if (sleepTimer < 2) {
+        overlay.style.opacity = 1;
+        dayTime = 0; // set to noon/morning
+        updateDayNight(0);
+        // Heal player while sleeping
+        player.health = Math.min(player.maxHealth, player.health + 4);
+        updateHealthBar();
+    } else if (sleepTimer < 3) {
+        overlay.style.opacity = 3 - sleepTimer;
+    } else {
+        sleeping = false;
+        overlay.style.display = 'none';
+        overlay.style.opacity = 0;
+    }
+}
+
+function generateVillage() {
+    // Find a flat area above sea level for the village
+    let vcx = -1, vcz = -1, baseY = -1;
+    for (let tries = 0; tries < 100; tries++) {
+        const tx = 15 + Math.floor(Math.random() * (WORLD_SIZE - 30));
+        const tz = 15 + Math.floor(Math.random() * (WORLD_SIZE - 30));
+        const ty = getVillageHeight(tx, tz);
+        if (ty > 9 && ty < WORLD_HEIGHT - 15) {
+            vcx = tx; vcz = tz; baseY = ty;
+            break;
+        }
+    }
+    if (vcx === -1) return; // no valid spot found
+
+    // Flatten the area
+    for (let x = vcx - 12; x <= vcx + 12; x++) {
+        for (let z = vcz - 12; z <= vcz + 12; z++) {
+            if (x < 0 || x >= WORLD_SIZE || z < 0 || z >= WORLD_SIZE) continue;
+            // Fill up to baseY with dirt, grass on top
+            for (let y = 1; y < WORLD_HEIGHT; y++) {
+                if (y < baseY) {
+                    if (getBlock(x, y, z) === BLOCKS.AIR) setBlock(x, y, z, BLOCKS.DIRT);
+                } else if (y === baseY) {
+                    setBlock(x, y, z, BLOCKS.GRASS);
+                } else {
+                    if (getBlock(x, y, z) !== BLOCKS.AIR) setBlock(x, y, z, BLOCKS.AIR);
+                }
+            }
+        }
+    }
+
+    // Path (sand) through village
+    for (let x = vcx - 10; x <= vcx + 10; x++) {
+        setBlock(x, baseY, vcz, BLOCKS.SAND);
+        setBlock(x, baseY, vcz + 1, BLOCKS.SAND);
+    }
+    for (let z = vcz - 8; z <= vcz + 8; z++) {
+        setBlock(vcx, baseY, z, BLOCKS.SAND);
+        setBlock(vcx + 1, baseY, z, BLOCKS.SAND);
+    }
+
+    // Build houses
+    const houses = [
+        { x: vcx - 7, z: vcz - 5, w: 5, d: 5 },
+        { x: vcx + 4, z: vcz - 5, w: 5, d: 4 },
+        { x: vcx - 7, z: vcz + 4, w: 4, d: 5 },
+        { x: vcx + 4, z: vcz + 3, w: 5, d: 5 },
+        { x: vcx - 2, z: vcz + 5, w: 4, d: 4 },
+    ];
+
+    for (const h of houses) {
+        buildHouse(h.x, baseY + 1, h.z, h.w, h.d);
+    }
+
+    // Well in center
+    buildWell(vcx, baseY, vcz);
+
+    // Store village center for villager spawning
+    villageCenter = { x: vcx, y: baseY + 1, z: vcz };
+}
+
+function getVillageHeight(x, z) {
+    for (let y = WORLD_HEIGHT - 1; y >= 0; y--) {
+        const b = getBlock(x, y, z);
+        if (b !== BLOCKS.AIR && b !== BLOCKS.WATER) return y;
+    }
+    return 10;
+}
+
+function buildHouse(bx, by, bz, w, d) {
+    const wallH = 3;
+    // Floor
+    for (let x = bx; x < bx + w; x++) {
+        for (let z = bz; z < bz + d; z++) {
+            setBlock(x, by - 1, z, BLOCKS.WOOD);
+        }
+    }
+    // Walls
+    for (let y = 0; y < wallH; y++) {
+        for (let x = bx; x < bx + w; x++) {
+            for (let z = bz; z < bz + d; z++) {
+                if (x === bx || x === bx + w - 1 || z === bz || z === bz + d - 1) {
+                    setBlock(x, by + y, z, BLOCKS.STONE);
+                }
+            }
+        }
+    }
+    // Door hole (front wall center)
+    const doorX = bx + Math.floor(w / 2);
+    setBlock(doorX, by, bz, BLOCKS.AIR);
+    setBlock(doorX, by + 1, bz, BLOCKS.AIR);
+    // Window holes
+    if (w >= 5) {
+        setBlock(bx + 1, by + 1, bz, BLOCKS.AIR);
+        setBlock(bx + w - 2, by + 1, bz, BLOCKS.AIR);
+    }
+    // Roof (wood)
+    for (let x = bx - 1; x < bx + w + 1; x++) {
+        for (let z = bz - 1; z < bz + d + 1; z++) {
+            setBlock(x, by + wallH, z, BLOCKS.WOOD);
+        }
+    }
+    // Bed inside (placed against back wall)
+    bedPositions.push({ x: bx + 1, y: by, z: bz + d - 2 });
+    // Chest inside (opposite side from bed)
+    villageChestPositions.push({ x: bx + w - 2, y: by, z: bz + d - 2 });
+}
+
+function buildWell(wx, wy, wz) {
+    // Stone ring
+    for (let x = wx - 1; x <= wx + 2; x++) {
+        for (let z = wz - 1; z <= wz + 2; z++) {
+            setBlock(x, wy + 1, z, BLOCKS.STONE);
+        }
+    }
+    // Water inside
+    setBlock(wx, wy + 1, wz, BLOCKS.WATER);
+    setBlock(wx + 1, wy + 1, wz, BLOCKS.WATER);
+    setBlock(wx, wy + 1, wz + 1, BLOCKS.WATER);
+    setBlock(wx + 1, wy + 1, wz + 1, BLOCKS.WATER);
+    // Posts
+    for (let y = 2; y <= 4; y++) {
+        setBlock(wx - 1, wy + y, wz - 1, BLOCKS.WOOD);
+        setBlock(wx + 2, wy + y, wz - 1, BLOCKS.WOOD);
+        setBlock(wx - 1, wy + y, wz + 2, BLOCKS.WOOD);
+        setBlock(wx + 2, wy + y, wz + 2, BLOCKS.WOOD);
+    }
+    // Roof
+    for (let x = wx - 1; x <= wx + 2; x++) {
+        for (let z = wz - 1; z <= wz + 2; z++) {
+            setBlock(x, wy + 5, z, BLOCKS.WOOD);
+        }
+    }
+}
+
+let villageCenter = null;
+
+// === VILLAGERS ===
+const villagers = [];
+
+function createVillagerMesh() {
+    const group = new THREE.Group();
+
+    // Head (big, bald, skin colored)
+    const headGeo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+    const headMat = new THREE.MeshLambertMaterial({ color: 0xC8A882 });
+    const head = new THREE.Mesh(headGeo, headMat);
+    head.position.y = 1.55;
+    group.add(head);
+
+    // Big nose
+    const noseGeo = new THREE.BoxGeometry(0.12, 0.2, 0.15);
+    const noseMat = new THREE.MeshLambertMaterial({ color: 0xB89872 });
+    const nose = new THREE.Mesh(noseGeo, noseMat);
+    nose.position.set(0, 1.48, 0.32);
+    group.add(nose);
+
+    // Green eyes
+    const eyeGeo = new THREE.BoxGeometry(0.07, 0.07, 0.04);
+    const eyeMat = new THREE.MeshLambertMaterial({ color: 0x228B22 });
+    const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+    const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+    eyeL.position.set(-0.12, 1.6, 0.26);
+    eyeR.position.set(0.12, 1.6, 0.26);
+    group.add(eyeL); group.add(eyeR);
+
+    // Unibrow
+    const browGeo = new THREE.BoxGeometry(0.35, 0.05, 0.04);
+    const browMat = new THREE.MeshLambertMaterial({ color: 0x3A2A1A });
+    const brow = new THREE.Mesh(browGeo, browMat);
+    brow.position.set(0, 1.67, 0.26);
+    group.add(brow);
+
+    // Brown robe body
+    const robeGeo = new THREE.BoxGeometry(0.55, 0.7, 0.4);
+    const robeMat = new THREE.MeshLambertMaterial({ color: 0x5A4030 });
+    const robe = new THREE.Mesh(robeGeo, robeMat);
+    robe.position.y = 1.0;
+    group.add(robe);
+
+    // Robe bottom (longer skirt)
+    const skirtGeo = new THREE.BoxGeometry(0.55, 0.35, 0.42);
+    const skirtMat = new THREE.MeshLambertMaterial({ color: 0x4A3525 });
+    const skirt = new THREE.Mesh(skirtGeo, skirtMat);
+    skirt.position.y = 0.55;
+    group.add(skirt);
+
+    // Arms (crossed/folded in robe)
+    const armGeo = new THREE.BoxGeometry(0.7, 0.2, 0.3);
+    const armMat = new THREE.MeshLambertMaterial({ color: 0x5A4030 });
+    const arms = new THREE.Mesh(armGeo, armMat);
+    arms.position.set(0, 1.1, 0.1);
+    group.add(arms);
+
+    // Gray boots/pants
+    const legGeo = new THREE.BoxGeometry(0.18, 0.35, 0.2);
+    const legMat = new THREE.MeshLambertMaterial({ color: 0x666666 });
+    const legL = new THREE.Mesh(legGeo, legMat);
+    const legR = new THREE.Mesh(legGeo, legMat);
+    legL.position.set(-0.12, 0.17, 0);
+    legR.position.set(0.12, 0.17, 0);
+    group.add(legL); group.add(legR);
+
+    return group;
+}
+
+function spawnVillagers() {
+    if (!villageCenter) return;
+    for (let i = 0; i < 6; i++) {
+        const angle = (i / 6) * Math.PI * 2;
+        const dist = 2 + Math.random() * 6;
+        const x = villageCenter.x + Math.cos(angle) * dist;
+        const z = villageCenter.z + Math.sin(angle) * dist;
+        const y = getSpawnY(x, z);
+        const mesh = createVillagerMesh();
+        mesh.position.set(x, y, z);
+        scene.add(mesh);
+        villagers.push({
+            mesh, x, y, z,
+            targetX: x, targetZ: z,
+            speed: 0.8 + Math.random() * 0.4,
+            moveTimer: Math.random() * 5,
+            yaw: Math.random() * Math.PI * 2,
+            homeX: x, homeZ: z,
+        });
+    }
+}
+
+function updateVillagers(dt) {
+    for (const v of villagers) {
+        v.moveTimer -= dt;
+        if (v.moveTimer <= 0) {
+            v.moveTimer = 3 + Math.random() * 6;
+            // Wander near home
+            const angle = Math.random() * Math.PI * 2;
+            const dist = 2 + Math.random() * 5;
+            v.targetX = Math.max(2, Math.min(WORLD_SIZE - 2, v.homeX + Math.cos(angle) * dist));
+            v.targetZ = Math.max(2, Math.min(WORLD_SIZE - 2, v.homeZ + Math.sin(angle) * dist));
+        }
+
+        const dx = v.targetX - v.x;
+        const dz = v.targetZ - v.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+
+        if (dist > 0.3) {
+            const newX = v.x + (dx / dist) * v.speed * dt;
+            const newZ = v.z + (dz / dist) * v.speed * dt;
+            const newY = getSpawnY(newX, newZ);
+            if (newY > 5 && Math.abs(newY - v.y) <= 1.5) {
+                v.x = newX;
+                v.z = newZ;
+                v.y = newY;
+                v.yaw = Math.atan2(dx, dz);
+            } else {
+                v.moveTimer = 0;
+            }
+        }
+
+        v.mesh.position.set(v.x, v.y, v.z);
+        v.mesh.rotation.y = v.yaw;
+    }
 }
 
 // === THREE.JS SETUP ===
@@ -278,7 +880,7 @@ function updateDayNight(dt) {
     // Smooth transition with cos
     const brightness = Math.max(0, Math.cos(dayTime * Math.PI * 2));
     // Add a little ambient so it's never pitch black
-    const ambientVal = 0.08 + brightness * 0.52;
+    const ambientVal = 0.25 + brightness * 0.35;
     const dirVal = brightness * 0.8;
 
     ambientLight.intensity = ambientVal;
@@ -1117,6 +1719,7 @@ function hitAnimal(animal) {
 }
 
 function damagePlayer(amount) {
+    if (gameMode === 'creative') return;
     if (player.hurtCooldown > 0) return;
     player.health -= amount;
     player.hurtTimer = 0.4;
@@ -1440,6 +2043,385 @@ function updateCraftingUI() {
             slot.addEventListener('click', () => doCraft(recipe));
         }
         grid.appendChild(slot);
+    }
+}
+
+// === HOSTILE MOBS (night only) ===
+const HOSTILE_TYPES = {
+    ZOMBIE: { body: 0x3A7A3A, w: 0.6, h: 1.5, d: 0.4, legColor: 0x2A5A2A, headColor: 0x4A8A4A, name: 'Zombie', speed: 1.8, health: 5, damage: 2, reach: 1.5 },
+    CREEPER: { body: 0x2AA52A, w: 0.5, h: 1.3, d: 0.5, legColor: 0x1A851A, headColor: 0x3AB53A, name: 'Creeper', speed: 1.5, health: 4, damage: 6, reach: 2.5, explodes: true },
+    SKELETON: { body: 0xCCCCCC, w: 0.5, h: 1.5, d: 0.35, legColor: 0xAAAAAA, headColor: 0xDDDDDD, name: 'Skeleton', speed: 1.6, health: 4, damage: 2, reach: 10, ranged: true },
+};
+
+const hostiles = [];
+let hostileSpawnTimer = 0;
+
+function createHostileMesh(type) {
+    const t = HOSTILE_TYPES[type];
+    const group = new THREE.Group();
+
+    // Body
+    const bodyGeo = new THREE.BoxGeometry(t.w, t.h * 0.45, t.d);
+    const bodyMat = new THREE.MeshLambertMaterial({ color: t.body });
+    const body = new THREE.Mesh(bodyGeo, bodyMat);
+    body.position.y = t.h * 0.55;
+    group.add(body);
+
+    // Head
+    const headSize = t.w * 0.8;
+    const headGeo = new THREE.BoxGeometry(headSize, headSize, headSize);
+    const headMat = new THREE.MeshLambertMaterial({ color: t.headColor });
+    const head = new THREE.Mesh(headGeo, headMat);
+    head.position.y = t.h * 0.8 + headSize * 0.3;
+    group.add(head);
+
+    // Eyes
+    const eyeSize = headSize * 0.15;
+    const eyeGeo = new THREE.BoxGeometry(eyeSize, eyeSize, eyeSize * 0.5);
+    if (type === 'CREEPER') {
+        // Creeper face - black eyes and frown
+        const eyeMat = new THREE.MeshLambertMaterial({ color: 0x000000 });
+        const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+        const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+        eyeL.position.set(-headSize * 0.2, head.position.y + headSize * 0.1, headSize * 0.5);
+        eyeR.position.set(headSize * 0.2, head.position.y + headSize * 0.1, headSize * 0.5);
+        group.add(eyeL); group.add(eyeR);
+        // Frown
+        const frownGeo = new THREE.BoxGeometry(headSize * 0.4, eyeSize * 0.8, eyeSize * 0.5);
+        const frown = new THREE.Mesh(frownGeo, eyeMat);
+        frown.position.set(0, head.position.y - headSize * 0.15, headSize * 0.5);
+        group.add(frown);
+    } else if (type === 'SKELETON') {
+        // Skeleton - dark eye sockets
+        const eyeMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
+        const eyeL = new THREE.Mesh(new THREE.BoxGeometry(eyeSize * 1.2, eyeSize * 1.2, eyeSize * 0.5), eyeMat);
+        const eyeR = eyeL.clone();
+        eyeL.position.set(-headSize * 0.2, head.position.y + headSize * 0.05, headSize * 0.5);
+        eyeR.position.set(headSize * 0.2, head.position.y + headSize * 0.05, headSize * 0.5);
+        group.add(eyeL); group.add(eyeR);
+        // Nose hole
+        const noseGeo = new THREE.BoxGeometry(eyeSize * 0.6, eyeSize * 0.8, eyeSize * 0.5);
+        const nose = new THREE.Mesh(noseGeo, eyeMat);
+        nose.position.set(0, head.position.y - headSize * 0.1, headSize * 0.5);
+        group.add(nose);
+        // Bow (stick in hand)
+        const bowGeo = new THREE.BoxGeometry(0.05, 0.6, 0.05);
+        const bowMat = new THREE.MeshLambertMaterial({ color: 0x6B4226 });
+        const bow = new THREE.Mesh(bowGeo, bowMat);
+        bow.position.set(t.w * 0.5 + 0.15, t.h * 0.55, 0);
+        bow.rotation.z = 0.3;
+        group.add(bow);
+    } else {
+        // Zombie - glowing eyes
+        const eyeMat = new THREE.MeshLambertMaterial({ color: 0x44FF44, emissive: 0x22AA22 });
+        const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+        const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+        eyeL.position.set(-headSize * 0.2, head.position.y + headSize * 0.1, headSize * 0.5);
+        eyeR.position.set(headSize * 0.2, head.position.y + headSize * 0.1, headSize * 0.5);
+        group.add(eyeL); group.add(eyeR);
+        // Arms stretched out (zombie style)
+        const armGeo = new THREE.BoxGeometry(0.15, 0.12, 0.5);
+        const armMat = new THREE.MeshLambertMaterial({ color: t.body });
+        const armL = new THREE.Mesh(armGeo, armMat);
+        const armR = new THREE.Mesh(armGeo, armMat);
+        armL.position.set(-t.w * 0.5 - 0.08, t.h * 0.6, t.d * 0.3);
+        armR.position.set(t.w * 0.5 + 0.08, t.h * 0.6, t.d * 0.3);
+        group.add(armL); group.add(armR);
+    }
+
+    // Legs (2)
+    const legGeo = new THREE.BoxGeometry(t.w * 0.35, t.h * 0.35, t.d * 0.8);
+    const legMat = new THREE.MeshLambertMaterial({ color: t.legColor });
+    const legL = new THREE.Mesh(legGeo, legMat);
+    const legR = new THREE.Mesh(legGeo, legMat);
+    legL.position.set(-t.w * 0.2, t.h * 0.17, 0);
+    legR.position.set(t.w * 0.2, t.h * 0.17, 0);
+    group.add(legL); group.add(legR);
+
+    return group;
+}
+
+function spawnHostile() {
+    const types = ['ZOMBIE', 'ZOMBIE', 'SKELETON', 'CREEPER']; // zombies more common
+    const type = types[Math.floor(Math.random() * types.length)];
+    const t = HOSTILE_TYPES[type];
+
+    // Spawn away from player but not too far
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 20 + Math.random() * 25;
+    const x = player.position.x + Math.cos(angle) * dist;
+    const z = player.position.z + Math.sin(angle) * dist;
+
+    if (x < 2 || x > WORLD_SIZE - 2 || z < 2 || z > WORLD_SIZE - 2) return;
+    const sy = getSpawnY(x, z);
+    if (sy <= 8) return; // Don't spawn in water
+
+    const mesh = createHostileMesh(type);
+    mesh.position.set(x, sy, z);
+    scene.add(mesh);
+    hostiles.push({
+        type, mesh, x, y: sy, z,
+        targetX: x, targetZ: z,
+        speed: t.speed,
+        moveTimer: 0,
+        yaw: Math.random() * Math.PI * 2,
+        health: t.health,
+        hurtTimer: 0,
+        attackCooldown: 0,
+        fuseTimer: 0, // for creeper
+    });
+}
+
+function removeHostile(hostile) {
+    scene.remove(hostile.mesh);
+    const idx = hostiles.indexOf(hostile);
+    if (idx !== -1) hostiles.splice(idx, 1);
+}
+
+function hitHostile(hostile) {
+    hostile.health -= getSwordDamage();
+    hostile.hurtTimer = 0.3;
+    hostile.mesh.traverse(function(child) {
+        if (child.isMesh && child._origColor === undefined) {
+            child._origColor = child.material.color.getHex();
+        }
+        if (child.isMesh) {
+            child.material = child.material.clone();
+            child.material.color.setHex(0xFF0000);
+        }
+    });
+    // Knockback
+    const dx = hostile.x - player.position.x;
+    const dz = hostile.z - player.position.z;
+    const dist = Math.sqrt(dx * dx + dz * dz) || 1;
+    hostile.x += (dx / dist) * 1.5;
+    hostile.z += (dz / dist) * 1.5;
+
+    if (hostile.health <= 0) {
+        // Drop loot
+        const drops = { ZOMBIE: BLOCKS.DIRT, SKELETON: BLOCKS.STONE, CREEPER: BLOCKS.SAND };
+        if (drops[hostile.type]) addToInventory(drops[hostile.type], 2);
+        updateHotbar();
+        removeHostile(hostile);
+    }
+}
+
+function raycastHostile() {
+    const dir = new THREE.Vector3(0, 0, -1);
+    dir.applyEuler(new THREE.Euler(player.pitch, player.yaw, 0, 'YXZ'));
+    const eyePos = new THREE.Vector3(player.position.x, player.position.y + PLAYER_EYE, player.position.z);
+
+    let closest = null;
+    let closestDist = 5;
+
+    for (const hostile of hostiles) {
+        const t = HOSTILE_TYPES[hostile.type];
+        const hw = t.w / 2 + 0.2;
+        const hd = t.d / 2 + 0.2;
+        const minX = hostile.x - hw, maxX = hostile.x + hw;
+        const minY = hostile.y, maxY = hostile.y + t.h + 0.3;
+        const minZ = hostile.z - hd, maxZ = hostile.z + hd;
+
+        for (let d = 0; d < closestDist; d += 0.1) {
+            const px = eyePos.x + dir.x * d;
+            const py = eyePos.y + dir.y * d;
+            const pz = eyePos.z + dir.z * d;
+            if (px >= minX && px <= maxX && py >= minY && py <= maxY && pz >= minZ && pz <= maxZ) {
+                closest = hostile;
+                closestDist = d;
+                break;
+            }
+        }
+    }
+    return closest;
+}
+
+// Arrow projectiles for skeletons
+const arrows = [];
+
+function spawnArrow(fromX, fromY, fromZ, toX, toY, toZ) {
+    const dir = new THREE.Vector3(toX - fromX, toY - fromY, toZ - fromZ).normalize();
+    const geo = new THREE.BoxGeometry(0.05, 0.05, 0.4);
+    const mat = new THREE.MeshLambertMaterial({ color: 0x4A3520 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(fromX, fromY + 1.0, fromZ);
+    mesh.lookAt(toX, toY + PLAYER_EYE, toZ);
+    scene.add(mesh);
+    arrows.push({ mesh, x: fromX, y: fromY + 1.0, z: fromZ, dx: dir.x, dy: dir.y, dz: dir.z, life: 2 });
+}
+
+function updateHostiles(dt) {
+    if (gameMode === 'creative') return;
+    // Spawn hostiles at night
+    const isNight = dayTime > 0.25 && dayTime < 0.75;
+
+    if (isNight) {
+        hostileSpawnTimer -= dt;
+        if (hostileSpawnTimer <= 0 && hostiles.length < 15) {
+            spawnHostile();
+            hostileSpawnTimer = 3 + Math.random() * 4;
+        }
+    } else {
+        // Daytime: burn and remove hostiles
+        for (let i = hostiles.length - 1; i >= 0; i--) {
+            const h = hostiles[i];
+            h.health -= dt * 3;
+            // Flash red while burning
+            h.mesh.traverse(function(child) {
+                if (child.isMesh) {
+                    if (!child._burnMat) {
+                        child._burnMat = true;
+                        child.material = child.material.clone();
+                    }
+                    child.material.color.setHex(Math.random() > 0.5 ? 0xFF4400 : 0xFF8800);
+                }
+            });
+            if (h.health <= 0) {
+                removeHostile(h);
+            }
+        }
+    }
+
+    for (let i = hostiles.length - 1; i >= 0; i--) {
+        const hostile = hostiles[i];
+        const t = HOSTILE_TYPES[hostile.type];
+        const pdx = player.position.x - hostile.x;
+        const pdz = player.position.z - hostile.z;
+        const pDist = Math.sqrt(pdx * pdx + pdz * pdz);
+
+        // Always chase player
+        if (pDist < 30) {
+            hostile.targetX = player.position.x;
+            hostile.targetZ = player.position.z;
+        }
+
+        // Creeper explosion
+        if (t.explodes && pDist < t.reach) {
+            hostile.fuseTimer += dt;
+            // Flash white when about to explode
+            if (hostile.fuseTimer > 0.5) {
+                hostile.mesh.traverse(function(child) {
+                    if (child.isMesh) {
+                        child.material = child.material.clone();
+                        child.material.color.setHex(Math.random() > 0.5 ? 0xFFFFFF : 0x2AA52A);
+                    }
+                });
+            }
+            if (hostile.fuseTimer >= 1.5) {
+                // BOOM
+                damagePlayer(t.damage);
+                // Knockback
+                const kd = pDist || 1;
+                player.velocity.x = (pdx / kd) * -8;
+                player.velocity.y = 5;
+                player.velocity.z = (pdz / kd) * -8;
+                player.onGround = false;
+                // Destroy some blocks around
+                const cx = Math.floor(hostile.x);
+                const cy = Math.floor(hostile.y);
+                const cz = Math.floor(hostile.z);
+                for (let bx = -1; bx <= 1; bx++) {
+                    for (let by = 0; by <= 1; by++) {
+                        for (let bz = -1; bz <= 1; bz++) {
+                            if (Math.random() < 0.5) {
+                                const b = getBlock(cx+bx, cy+by, cz+bz);
+                                if (b !== BLOCKS.AIR && b !== BLOCKS.WATER) {
+                                    setBlock(cx+bx, cy+by, cz+bz, BLOCKS.AIR);
+                                }
+                            }
+                        }
+                    }
+                }
+                rebuildChunkAt(cx, cz);
+                removeHostile(hostile);
+                continue;
+            }
+        } else if (t.explodes) {
+            hostile.fuseTimer = Math.max(0, hostile.fuseTimer - dt * 2);
+        }
+
+        // Skeleton ranged attack
+        if (t.ranged && pDist < t.reach && pDist > 3) {
+            if (hostile.attackCooldown <= 0) {
+                spawnArrow(hostile.x, hostile.y, hostile.z, player.position.x, player.position.y, player.position.z);
+                hostile.attackCooldown = 2.0;
+            }
+        }
+
+        // Melee attack (zombie, skeleton close range)
+        if (!t.explodes && pDist < 1.5) {
+            if (hostile.attackCooldown <= 0) {
+                damagePlayer(t.damage);
+                const kd = pDist || 1;
+                player.velocity.x = (-pdx / kd) * 4;
+                player.velocity.z = (-pdz / kd) * 4;
+                hostile.attackCooldown = 1.0;
+            }
+        }
+
+        if (hostile.attackCooldown > 0) hostile.attackCooldown -= dt;
+
+        // Move toward target
+        const dx = hostile.targetX - hostile.x;
+        const dz = hostile.targetZ - hostile.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+
+        if (dist > 0.5) {
+            const moveX = (dx / dist) * hostile.speed * dt;
+            const moveZ = (dz / dist) * hostile.speed * dt;
+            const newX = hostile.x + moveX;
+            const newZ = hostile.z + moveZ;
+            const newY = getSpawnY(newX, newZ);
+            if (newY > 5 && Math.abs(newY - hostile.y) <= 1.5) {
+                hostile.x = newX;
+                hostile.z = newZ;
+                hostile.y = newY;
+                hostile.yaw = Math.atan2(dx, dz);
+            }
+        }
+
+        // Hurt flash timer
+        if (hostile.hurtTimer > 0) {
+            hostile.hurtTimer -= dt;
+            if (hostile.hurtTimer <= 0) {
+                hostile.mesh.traverse(function(child) {
+                    if (child.isMesh && child._origColor !== undefined) {
+                        child.material.color.setHex(child._origColor);
+                    }
+                });
+            }
+        }
+
+        hostile.mesh.position.set(hostile.x, hostile.y, hostile.z);
+        hostile.mesh.rotation.y = hostile.yaw;
+    }
+
+    // Update arrows
+    for (let i = arrows.length - 1; i >= 0; i--) {
+        const a = arrows[i];
+        a.life -= dt;
+        const speed = 12;
+        a.x += a.dx * speed * dt;
+        a.y += a.dy * speed * dt;
+        a.z += a.dz * speed * dt;
+        a.mesh.position.set(a.x, a.y, a.z);
+
+        // Hit player?
+        const hw = PLAYER_WIDTH / 2 + 0.2;
+        if (Math.abs(a.x - player.position.x) < hw &&
+            a.y >= player.position.y && a.y <= player.position.y + PLAYER_HEIGHT &&
+            Math.abs(a.z - player.position.z) < hw) {
+            damagePlayer(2);
+            scene.remove(a.mesh);
+            arrows.splice(i, 1);
+            continue;
+        }
+
+        // Hit block or expired?
+        if (a.life <= 0 || getBlock(Math.floor(a.x), Math.floor(a.y), Math.floor(a.z)) !== BLOCKS.AIR) {
+            scene.remove(a.mesh);
+            arrows.splice(i, 1);
+        }
     }
 }
 
@@ -1851,55 +2833,90 @@ function getSpawnY(x, z) {
 const keys = {};
 let gameActive = false;
 let pointerLocked = false;
-let rightDragDist = 0;
 
 document.addEventListener('keydown', (e) => {
     keys[e.code] = true;
     if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
         e.preventDefault();
     }
+    // Creative mode: double-tap space to toggle flying
+    if (e.code === 'Space' && !e.repeat && gameMode === 'creative' && gameActive) {
+        const now = performance.now();
+        if (now - lastSpaceTap < 400) {
+            flying = !flying;
+            player.velocity.y = 0;
+            lastSpaceTap = 0;
+        } else {
+            lastSpaceTap = now;
+        }
+    }
 });
 document.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+// === MOUSE NAVIGATION ===
+// Classic FPS click-to-lock pattern:
+//   - Click the canvas to enter "look mode" (cursor captured, mouse controls camera)
+//   - ESC to exit look mode
+//   - In look mode: left-click = break, right-click = place (no drag required)
+// If pointer lock is unavailable (e.g. sandboxed iframe), look mode still works
+// via raw mousemove deltas; the cursor stays visible but camera rotation works.
+const MOUSE_SENSITIVITY = 0.0022;   // radians per pixel
+const MAX_DELTA_PX = 80;            // cap spurious spikes during lock transitions
+const PITCH_LIMIT = Math.PI / 2 - 0.01;
+
+let lookMode = false;    // user wants the mouse to drive the camera
+
+function enterLookMode() {
+    if (lookMode) return;
+    lookMode = true;
+    document.body.classList.add('looking');
+    try { renderer.domElement.requestPointerLock(); } catch (err) {}
+}
+
+function exitLookMode() {
+    if (!lookMode) return;
+    lookMode = false;
+    document.body.classList.remove('looking');
+    if (document.pointerLockElement) {
+        try { document.exitPointerLock(); } catch (err) {}
+    }
+}
+
+document.addEventListener('pointerlockchange', () => {
+    pointerLocked = document.pointerLockElement === renderer.domElement;
+    if (!pointerLocked && lookMode) {
+        // Lock released externally (ESC) — exit look mode too
+        lookMode = false;
+        document.body.classList.remove('looking');
+    }
+});
+document.addEventListener('pointerlockerror', () => { pointerLocked = false; });
+
+// Single mousemove handler — simple, direct, no buffering.
+// Applies to every mouse move while in look mode.
+document.addEventListener('mousemove', (e) => {
+    if (!lookMode || !gameActive) return;
+    let mx = e.movementX || 0;
+    let my = e.movementY || 0;
+    if (mx >  MAX_DELTA_PX || mx < -MAX_DELTA_PX) mx = 0;
+    if (my >  MAX_DELTA_PX || my < -MAX_DELTA_PX) my = 0;
+    player.yaw -= mx * MOUSE_SENSITIVITY;
+    player.pitch -= my * MOUSE_SENSITIVITY;
+    if (player.pitch >  PITCH_LIMIT) player.pitch =  PITCH_LIMIT;
+    if (player.pitch < -PITCH_LIMIT) player.pitch = -PITCH_LIMIT;
+    // Push to camera immediately — avoids 1-frame lag
+    camera.rotation.y = player.yaw;
+    camera.rotation.x = player.pitch;
+});
 
 document.addEventListener('click', (e) => {
     if (!gameActive) {
         gameActive = true;
         document.getElementById('instructions').style.display = 'none';
-        try { renderer.domElement.requestPointerLock(); } catch(err) {}
         return;
     }
-    if (craftingOpen || chestOpen || inventoryOpen) return;
-    if (!pointerLocked) {
-        try { renderer.domElement.requestPointerLock(); } catch(err) {}
-    }
-});
-
-document.addEventListener('pointerlockchange', () => {
-    pointerLocked = document.pointerLockElement === renderer.domElement;
-    if (pointerLocked) {
-        gameActive = true;
-        document.getElementById('instructions').style.display = 'none';
-    }
-});
-
-document.addEventListener('pointerlockerror', () => {
-    pointerLocked = false;
-});
-
-// Mouse look: pointer lock OR right-drag
-document.addEventListener('mousemove', (e) => {
-    if (!gameActive) return;
-    if (pointerLocked) {
-        player.yaw -= e.movementX * 0.002;
-        player.pitch -= e.movementY * 0.002;
-        player.pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, player.pitch));
-    } else if (e.buttons === 2) {
-        // Right-drag to look (no pointer lock)
-        player.yaw -= e.movementX * 0.004;
-        player.pitch -= e.movementY * 0.004;
-        player.pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, player.pitch));
-        rightDragDist += Math.abs(e.movementX) + Math.abs(e.movementY);
-    }
+    if (inventoryOpen || craftingOpen || chestOpen) return;
+    if (!lookMode) enterLookMode();
 });
 
 function pickUpSpecialBlock() {
@@ -1950,6 +2967,11 @@ function placeBlock() {
     if (blockType === BLOCKS.DOOR_CLOSED) {
         createDoorMesh(px, py, pz, false);
     }
+    if (blockType === BLOCKS.WATER) {
+        const k = waterKey(px, py, pz);
+        waterLevel.set(k, 0);
+        activeWater.add(k);
+    }
     rebuildChunkAt(px, pz);
     updateHotbar();
     if (inventoryOpen) updateInventoryUI();
@@ -1959,6 +2981,8 @@ function breakBlock() {
     const hit = raycast();
     if (!hit) return;
     const blockType = getBlock(hit.x, hit.y, hit.z);
+    // Water cannot be broken
+    if (blockType === BLOCKS.WATER) return;
     // If it's a door, toggle open/closed
     if (blockType === BLOCKS.DOOR_CLOSED || blockType === BLOCKS.DOOR_OPEN) {
         toggleDoor(hit.x, hit.y, hit.z);
@@ -1977,6 +3001,8 @@ function breakBlock() {
     setBlock(hit.x, hit.y, hit.z, BLOCKS.AIR);
     addToInventory(blockType === BLOCKS.DOOR_OPEN ? BLOCKS.DOOR_CLOSED : blockType);
     rebuildChunkAt(hit.x, hit.z);
+    // Wake up water that might flow into this newly-opened space
+    activateWaterNeighbors(hit.x, hit.y, hit.z);
     updateHotbar();
     if (inventoryOpen) updateInventoryUI();
 }
@@ -1993,36 +3019,32 @@ function toggleDoor(x, y, z) {
     rebuildChunkAt(x, z);
 }
 
-// Left click = break, right click = place
+// Left click = break (or interact), right click = place (or pick up).
+// If not in look mode, the first click enters look mode instead of performing an action.
 document.addEventListener('mousedown', (e) => {
     if (!gameActive) return;
     if (craftingOpen || chestOpen || inventoryOpen) return;
+    if (!lookMode) {
+        enterLookMode();
+        e.preventDefault();
+        return;
+    }
     if (e.button === 0) {
-        // Check animals first
+        // Interact targets, in priority order
+        const hitVC = raycastVillageChest();
+        if (hitVC) { openChest(hitVC.x, hitVC.y, hitVC.z); return; }
+        const hitB = raycastBed();
+        if (hitB) { sleep(); return; }
+        const hitH = raycastHostile();
+        if (hitH) { hitHostile(hitH); return; }
         const hitA = raycastAnimal();
         if (hitA) { hitAnimal(hitA); return; }
-        // Check plants
         const hitP = raycastPlant();
         if (hitP) { breakPlant(hitP); return; }
         breakBlock();
-    } else if (e.button === 2) {
-        rightDragDist = 0;
-        if (pointerLocked) {
-            if (!pickUpSpecialBlock()) placeBlock();
-        }
-        e.preventDefault();
-    } else if (e.button === 1) {
-        placeBlock();
-        e.preventDefault();
-    }
-});
-
-document.addEventListener('mouseup', (e) => {
-    if (!gameActive) return;
-    if (craftingOpen || chestOpen || inventoryOpen) return;
-    // Without pointer lock: right click places only if mouse wasn't dragged (used for looking)
-    if (e.button === 2 && !pointerLocked && rightDragDist < 10) {
+    } else if (e.button === 2 || e.button === 1) {
         if (!pickUpSpecialBlock()) placeBlock();
+        e.preventDefault();
     }
 });
 
@@ -2041,6 +3063,7 @@ document.addEventListener('keydown', (e) => {
     if (e.code === 'Escape') {
         if (craftingOpen) { closeCrafting(); return; }
         if (chestOpen) { closeChest(); return; }
+        if (lookMode) { exitLookMode(); return; }
     }
     if (inventoryOpen || craftingOpen || chestOpen) return;
     const num = parseInt(e.key);
@@ -2084,6 +3107,7 @@ function updateAirBar(inWater) {
 
 function updateHealthBar() {
     const hb = document.getElementById('healthbar');
+    if (gameMode === 'creative') { hb.innerHTML = ''; return; }
     hb.innerHTML = '';
     for (let i = 0; i < player.maxHealth; i += 2) {
         const heart = document.createElement('span');
@@ -2112,8 +3136,9 @@ function updateHotbar() {
         const count = getInvCount(bt);
         const color = BLOCK_COLORS[bt].top;
         const colorHex = '#' + color.toString(16).padStart(6, '0');
-        slot.innerHTML = `<div style="width:50px;height:50px;background:${colorHex};border:2px solid rgba(0,0,0,0.3);opacity:${count > 0 ? 1 : 0.3};border-radius:3px;"></div><span class="count">${count}</span>`;
-        slot.title = BLOCK_NAMES[bt] + ' (' + count + ')';
+        const displayCount = gameMode === 'creative' ? '∞' : count;
+        slot.innerHTML = `<div style="width:32px;height:32px;background:${colorHex};border:1px solid rgba(0,0,0,0.3);opacity:${count > 0 || gameMode === 'creative' ? 1 : 0.3};border-radius:2px;"></div><span class="count">${displayCount}</span>`;
+        slot.title = BLOCK_NAMES[bt] + (gameMode === 'creative' ? '' : ' (' + count + ')');
         hotbar.appendChild(slot);
     }
 }
@@ -2219,27 +3244,42 @@ function update() {
     if (move.length() > 0) move.normalize();
     move.multiplyScalar(MOVE_SPEED);
 
+    // Arrow keys camera look (works without pointer lock)
+    const LOOK_SPEED = 3.0;
+    if (keys['ArrowLeft']) player.yaw += LOOK_SPEED * dt;
+    if (keys['ArrowRight']) player.yaw -= LOOK_SPEED * dt;
+    if (keys['ArrowUp']) player.pitch += LOOK_SPEED * dt;
+    if (keys['ArrowDown']) player.pitch -= LOOK_SPEED * dt;
+    player.pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, player.pitch));
+
     // position.y = feet position throughout
 
-    // Ground check
-    if (player.onGround) {
-        // Check if still on ground
-        if (!hasGroundBelow(player.position.x, player.position.y, player.position.z)) {
+    // Creative flying: double-tap space to toggle
+    if (gameMode === 'creative' && flying) {
+        player.velocity.y = 0;
+        if (keys['Space']) player.velocity.y = 8;
+        if (keys['ShiftLeft'] || keys['ShiftRight']) player.velocity.y = -8;
+        player.onGround = false;
+    } else {
+        // Ground check
+        if (player.onGround) {
+            if (!hasGroundBelow(player.position.x, player.position.y, player.position.z)) {
+                player.onGround = false;
+            }
+        }
+
+        // Apply gravity only when not on ground
+        if (!player.onGround) {
+            player.velocity.y += GRAVITY * dt;
+        } else {
+            player.velocity.y = 0;
+        }
+
+        // Jump
+        if (keys['Space'] && player.onGround) {
+            player.velocity.y = JUMP_SPEED;
             player.onGround = false;
         }
-    }
-
-    // Apply gravity only when not on ground
-    if (!player.onGround) {
-        player.velocity.y += GRAVITY * dt;
-    } else {
-        player.velocity.y = 0;
-    }
-
-    // Jump
-    if (keys['Space'] && player.onGround) {
-        player.velocity.y = JUMP_SPEED;
-        player.onGround = false;
     }
 
     // Move X
@@ -2272,8 +3312,8 @@ function update() {
         }
     }
 
-    // Fall out of world = death
-    if (player.position.y < -10) {
+    // Fall out of world = death (survival only)
+    if (player.position.y < -10 && gameMode === 'survival') {
         player.hurtCooldown = 0;
         player.health = 1;
         damagePlayer(10);
@@ -2289,9 +3329,9 @@ function update() {
     }
     if (player.hurtCooldown > 0) player.hurtCooldown -= dt;
 
-    // Drowning
+    // Drowning (skip in creative)
     const headY = player.position.y + PLAYER_EYE;
-    const inWater = isWaterAt(player.position.x, headY, player.position.z);
+    const inWater = gameMode === 'creative' ? false : isWaterAt(player.position.x, headY, player.position.z);
     if (inWater) {
         player.drownTimer += dt;
         if (player.drownTimer >= player.maxAir) {
@@ -2329,6 +3369,18 @@ function update() {
 
     // Day/night cycle
     updateDayNight(dt);
+
+    // Hostile mobs
+    updateHostiles(dt);
+
+    // Villagers
+    updateVillagers(dt);
+
+    // Sleep
+    updateSleep(dt);
+
+    // Water flow
+    updateWater(dt);
 }
 
 function animate() {
@@ -2351,6 +3403,9 @@ rebuildAllChunks();
 refreshAllDoorMeshes();
 spawnPlants();
 spawnAnimals();
+spawnBeds();
+spawnVillageChests();
+spawnVillagers();
 updateHotbar();
 updateHealthBar();
 animate();
